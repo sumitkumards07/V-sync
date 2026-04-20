@@ -1,0 +1,256 @@
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:vsync/core/di/provider/vtop_user_provider.dart';
+import 'package:vsync/core/exceptions.dart';
+import 'package:vsync/core/utils/featureflags/feature_flags.dart';
+import 'package:vsync/features/attendance/presentation/providers/attendance_provider.dart';
+import 'package:vsync/features/attendance/presentation/providers/full_attendance_provider.dart';
+import 'package:vsync/features/more/presentation/providers/exam_schedule.dart';
+import 'package:vsync/features/more/presentation/providers/marks_provider.dart';
+import 'package:vsync/features/settings/presentation/providers/semester_id_provider.dart';
+import 'package:vsync/features/timetable/presentation/providers/timetable_provider.dart';
+import 'package:vsync/src/api/vtop/vtop_errors.dart';
+import 'package:vsync/src/frb_generated.dart';
+import 'package:workmanager/workmanager.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+@pragma('vm:entry-point')
+void callbackDispatcher() {
+  Workmanager().executeTask((task, inputdata) async {
+    switch (task) {
+      case "sync_vtop":
+        await BackgroundNotificationService.initialize();
+        await BackgroundNotificationService.showProgress();
+        final k = await _syncData(task: task);
+        await BackgroundNotificationService.stop(success: k);
+        return true;
+      default:
+        break;
+    }
+    return Future.value(true);
+  });
+}
+
+Future<bool> _syncData({String? task}) async {
+  final container = ProviderContainer();
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('${task}_val_start', DateTime.now().toString());
+
+    await RustLib.init();
+    final user = await container.read(vtopUserProvider.future);
+    if (!user.isValid || user.semid == null) {
+      return true;
+    }
+    var gb = await container.read(gbProvider.future);
+    var feature = gb.feature("background-sync");
+    if (!(feature.on && feature.value)) {
+      return true;
+    }
+    final List<Future<bool>> futures = [];
+
+    final timetable = await container.read(timetableProvider.future);
+    if (!_isUpdatedWithinBacksyncWindow(timetable.updateTime)) {
+      futures.add(
+        _retryer(
+          () => container.read(timetableProvider.notifier).updateTimetable(),
+        ),
+      );
+    }
+
+    final marks = await container.read(marksProvider.future);
+    if (!_isUpdatedWithinBacksyncWindow(marks.updateTime)) {
+      futures.add(
+        _retryer(() => container.read(marksProvider.notifier).updatemarks()),
+      );
+    }
+
+    final examSchedule = await container.read(examScheduleProvider.future);
+    if (!_isUpdatedWithinBacksyncWindow(examSchedule.updateTime)) {
+      futures.add(
+        _retryer(
+          () =>
+              container.read(examScheduleProvider.notifier).updatexamschedule(),
+        ),
+      );
+    }
+
+    final semids = await container.read(semesterIdProvider.future);
+    if (!_isUpdatedWithinBacksyncWindow(semids.updateTime)) {
+      futures.add(
+        _retryer(
+          () => container.read(semesterIdProvider.notifier).updatesemids(),
+        ),
+      );
+    }
+
+    futures.add(_attendanceSync(container, task));
+    final k = await Future.wait(futures);
+    await prefs.setString('${task}_val_end', DateTime.now().toString());
+    return atLeastHalfTrue(k);
+  } catch (e) {
+    return false;
+  } finally {
+    container.dispose();
+  }
+}
+
+const _backsyncFreshWindow = Duration(minutes: 15);
+
+bool _isUpdatedWithinBacksyncWindow(BigInt updatedAt) {
+  final nowUnixSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final minFresh = BigInt.from(nowUnixSeconds - _backsyncFreshWindow.inSeconds);
+  return _isFreshSince(updatedAt, minFresh);
+}
+
+bool _isFreshSince(BigInt updatedAt, BigInt minFresh) {
+  return updatedAt > BigInt.zero && updatedAt >= minFresh;
+}
+
+bool atLeastHalfTrue(List<bool> k) {
+  if (k.isEmpty) return true;
+  final trueCount = k.where((e) => e).length;
+  return trueCount * 2 >= k.length;
+}
+
+Future<bool> _retryer(Future<void> Function() func) async {
+  // ignore: non_constant_identifier_names
+  final int MAX_TRY = 3;
+  int runs = 0;
+  while (runs < MAX_TRY) {
+    runs += 1;
+    try {
+      await func();
+      return true;
+    } catch (e) {
+      if (e is FeatureDisabledException) {
+        return true;
+      }
+      if (runs == MAX_TRY && e is VtopError) return true;
+      if (runs == MAX_TRY) break;
+      await Future.delayed(Duration(milliseconds: 400 * (runs + 1)));
+    }
+  }
+  return false;
+}
+
+Future<bool> _attendanceSync(ProviderContainer container, String? task) async {
+  try {
+    var att = await container.read(attendanceProvider.future);
+    var ok = true;
+    if (!_isUpdatedWithinBacksyncWindow(att.updateTime)) {
+      ok = await _retryer(
+        () => container.read(attendanceProvider.notifier).updateAttendance(),
+      );
+      att = await container.read(attendanceProvider.future);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('${task}_val', att.toString());
+
+    final k = await Future.wait([
+      for (final i in att.records)
+        () async {
+          final fullAttendance = await container.read(
+            fullAttendanceProvider(i.courseType, i.courseId).future,
+          );
+          if (_isUpdatedWithinBacksyncWindow(fullAttendance.updateTime)) {
+            return true;
+          }
+          return _retryer(
+            () =>
+                container
+                    .read(
+                      fullAttendanceProvider(i.courseType, i.courseId).notifier,
+                    )
+                    .updateAttendance(),
+          );
+        }(),
+    ]);
+    return atLeastHalfTrue(k) && ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+class BackgroundNotificationService {
+  static final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
+
+  static const int _syncId = 9001;
+  static const _backSyncId = "background_sync_v2";
+  static const _backSyncDoneId = "background_sync_done_v2";
+  static const AndroidNotificationChannel _backgroundSyncChannel =
+      AndroidNotificationChannel(
+        _backSyncId,
+        'Background Sync',
+        description: 'Background data synchronization',
+        importance: Importance.min,
+      );
+  static const AndroidNotificationChannel _backgroundSyncChannelDone =
+      AndroidNotificationChannel(
+        _backSyncDoneId,
+        'Background Sync done',
+        description: 'Background data synchronization done',
+        importance: Importance.min,
+      );
+
+  static Future<void> initialize() async {
+    const AndroidInitializationSettings androidSettings =
+        AndroidInitializationSettings('@mipmap/launcher_icon');
+
+    const settings = InitializationSettings(android: androidSettings);
+
+    await _notifications.initialize(settings: settings);
+
+    await _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.createNotificationChannel(_backgroundSyncChannelDone);
+
+    await _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.createNotificationChannel(_backgroundSyncChannel);
+  }
+
+  static Future<void> showProgress() async {
+    await _notifications.show(
+      id: _syncId,
+      title: 'V-sync',
+      body: 'Syncing VTOP data in background...',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _backSyncId,
+          'Background Sync',
+          importance: Importance.low,
+          priority: Priority.low,
+          ongoing: true,
+          indeterminate: true,
+          showProgress: true,
+          silent: true,
+          timeoutAfter: 1000 * 60 * 5,
+        ),
+      ),
+    );
+  }
+
+  static Future<void> stop({required bool success}) async {
+    await _notifications.cancel(id: _syncId);
+
+    // await _notifications.show(
+    //   _syncId + 1,
+    //   success ? 'Background sync completed' : 'Failed to sync some data',
+    //   const NotificationDetails(
+    //     android: AndroidNotificationDetails(
+    //       _backSyncDoneId,
+    //       'Background Sync done',
+    //       importance: Importance.min,
+    //       priority: Priority.min,
+    //       silent: true,
+    //     ),
+    //   ),
+    // );
+  }
+}
