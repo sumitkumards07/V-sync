@@ -55,7 +55,7 @@ class PrivacyPage extends ConsumerWidget {
               icon: FIcons.globe,
               title: "Campus Services",
               description:
-                  "Static data like Mess Menus and Travel Buddy posts are fetched from our secure cloud. No personal VTOP data is ever linked or shared with these services.",
+                  "Static data like Mess Menus are fetched from our secure cloud. No personal VTOP data is ever linked or shared with these services.",
               color: Colors.orangeAccent,
             ),
             const SizedBox(height: 24),

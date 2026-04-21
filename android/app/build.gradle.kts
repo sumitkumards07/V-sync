@@ -37,7 +37,7 @@ dependencies {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         manifestPlaceholders["appAuthRedirectScheme"] =
-            "com.googleusercontent.apps.95428715364-4f11adlt9kjaubvc3jif86cectghm448"
+            "com.googleusercontent.apps.767383683310-uq2u9u0menoa8pl1pqkhtrv32s564jlj"
     }
     signingConfigs {
     create("release") {

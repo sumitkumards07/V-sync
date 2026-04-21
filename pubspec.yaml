@@ -37,6 +37,7 @@ dependencies:
   rust_lib_vsync:
     path: rust_builder
   flutter_secure_storage: ^10.0.0
+  google_sign_in: ^6.2.1
   shared_preferences: ^2.5.3
   hooks_riverpod: ^3.1.0
   flutter_hooks: ^0.21.2
@@ -58,6 +59,7 @@ dependencies:
   permission_handler: ^12.0.0+1
   path_provider: ^2.1.5
   webview_flutter: ^4.13.0
+  enough_mail: ^2.1.7
   background_downloader: ^9.4.0
   dio: ^5.8.0+1
   http: ^1.4.0
@@ -144,3 +146,6 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+dependency_overrides:
+  pointycastle: ^4.0.0

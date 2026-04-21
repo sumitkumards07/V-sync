@@ -25,8 +25,6 @@ class CampusRepository {
       return const CampusHomeData(
         menu: [],
         upcomingExam: null,
-        trips: [],
-        lostFound: [],
       );
     }
 
@@ -102,29 +100,11 @@ class CampusRepository {
 
     final examSchedule = await services.vtopDataRepository.loadExamSchedule();
 
-    final trips = await safeList(
-      () => client
-          .from('travel_buddies')
-          .select()
-          .gte('trip_date', todayIso)
-          .order('trip_date')
-          .limit(6),
-    );
 
-    final lostFound = await safeList(
-      () => client
-          .from('lost_found_posts')
-          .select()
-          .eq('is_hidden', false)
-          .order('created_at', ascending: false)
-          .limit(6),
-    );
 
     return CampusHomeData(
       menu: menus.map(MessMenuItem.fromMap).toList(),
       upcomingExam: nextExamFromVtop(examSchedule),
-      trips: trips.map(TravelBuddyTrip.fromMap).toList(),
-      lostFound: lostFound.map(LostFoundPost.fromMap).toList(),
     );
   }
 }
